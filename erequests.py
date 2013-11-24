@@ -5,26 +5,21 @@ erequests
 ~~~~~~~~~
 
 This module contains an asynchronous replica of ``requests.api``, powered
-by eventlet. All API methods return a ``Request`` instance (as opposed to
-``Response``). A list of requests can be sent with ``map()``.
+by eventlet.
 """
 
-from functools import partial
-
 import eventlet
-from eventlet import patcher
-from eventlet.greenpool import GreenPool
 
 # Monkey-patch.
-requests = patcher.import_patched('requests')
+requests = eventlet.patcher.import_patched('requests')
 
-__all__ = ['map', 'imap', 'get', 'options', 'head', 'post', 'put', 'patch', 'delete', 'request']
+__all__ = ['map', 'imap', 'get', 'options', 'head', 'post', 'put', 'patch', 'delete', 'request', 'async', 'AsyncRequest']
 
 # Export same items as vanilla requests
 __requests_imports__ = ['utils', 'session', 'Session', 'codes', 'RequestException', 'Timeout', 'URLRequired', 'TooManyRedirects', 'HTTPError', 'ConnectionError']
-patcher.slurp_properties(requests, globals(), srckeys=__requests_imports__)
+eventlet.patcher.slurp_properties(requests, globals(), srckeys=__requests_imports__)
 __all__.extend(__requests_imports__)
-del requests, patcher, __requests_imports__
+del requests, __requests_imports__
 
 
 class AsyncRequest(object):
@@ -35,99 +30,146 @@ class AsyncRequest(object):
     :param session: Session which will do request
     :param callback: Callback called on response. Same as passing ``hooks={'response': callback}``
     """
-    def __init__(self, method, url, **kwargs):
-        #: Request method
+    def __init__(self, method, url, session=None):
         self.method = method
-        #: URL to request
         self.url = url
-        #: Associated ``Session``
-        self.session = kwargs.pop('session', None)
-        if self.session is None:
-            self.session = Session()
+        self.session = session or Session()
+        self._prepared_kwargs = None
 
-        callback = kwargs.pop('callback', None)
-        if callback:
-            kwargs['hooks'] = {'response': callback}
-
-        #: The rest arguments for ``Session.request``
-        self.kwargs = kwargs
-        #: Resulting ``Response``
-        self.response = None
+    def prepare(self, **kwargs):
+        assert self._prepared_kwargs is None, 'cannot call prepare multiple times'
+        self._prepared_kwargs = kwargs
 
     def send(self, **kwargs):
-        """
-        Prepares request based on parameter passed to constructor and optional ``kwargs```.
-        Then sends request and saves response to :attr:`response`
+        kw = self._prepared_kwargs or {}
+        kw.update(kwargs)
+        return self.session.request(self.method, self.url, **kw)
 
-        :returns: ``Response``
-        """
-        merged_kwargs = {}
-        merged_kwargs.update(self.kwargs)
-        merged_kwargs.update(kwargs)
-        self.response = self.session.request(self.method, self.url, **merged_kwargs)
-        return self.response
+    def __repr__(self):
+        return '<%s [%s]>' % (self.__class__.__name__, self.method)
 
 
-def send(r, pool=None, stream=False):
-    """Sends the request object using the specified pool. If a pool isn't
-    specified this method blocks. Pools are useful because you can specify size
-    and can hence limit concurrency."""
-    if pool is not None:
-        return pool.spawn(r.send, stream=stream)
-    return eventlet.spawn(r.send, stream=stream)
+class AsyncRequestFactory(object):
+    """ Factory for AsyncRequests. Serious business yo!
+    """
+
+    request_cls = AsyncRequest
 
 
-# Shortcuts for creating AsyncRequest with appropriate HTTP method
-get = partial(AsyncRequest, 'GET')
-options = partial(AsyncRequest, 'OPTIONS')
-head = partial(AsyncRequest, 'HEAD')
-post = partial(AsyncRequest, 'POST')
-put = partial(AsyncRequest, 'PUT')
-patch = partial(AsyncRequest, 'PATCH')
-delete = partial(AsyncRequest, 'DELETE')
+    @classmethod
+    def request(cls, method, url, **kwargs):
+        session = kwargs.pop('session', None)
+        r = cls.request_cls(method, url, session)
+        r.prepare(**kwargs)
+        return r
+
+    @classmethod
+    def get(cls, url, **kwargs):
+        kwargs.setdefault('allow_redirects', True)
+        return cls.request('GET', url, **kwargs)
+
+    @classmethod
+    def options(cls, url, **kwargs):
+        kwargs.setdefault('allow_redirects', True)
+        return cls.request('OPTIONS', url, **kwargs)
+
+    @classmethod
+    def head(cls, url, **kwargs):
+        kwargs.setdefault('allow_redirects', False)
+        return cls.request('HEAD', url, **kwargs)
+
+    @classmethod
+    def post(cls, url, data=None, **kwargs):
+        return cls.request('POST', url, data=data, **kwargs)
+
+    @classmethod
+    def put(cls, url, data=None, **kwargs):
+        return cls.request('PUT', url, data=data, **kwargs)
+
+    @classmethod
+    def patch(cls, url, data=None, **kwargs):
+        return cls.request('PATCH', url, data=data, **kwargs)
+
+    @classmethod
+    def delete(cls, url, **kwargs):
+        return cls.request('DELETE', url, **kwargs)
 
 
-# synonym
+# alias for the factory
+async = AsyncRequestFactory
+
+
 def request(method, url, **kwargs):
-    return AsyncRequest(method, url, **kwargs)
+    req = AsyncRequest(method, url)
+    return eventlet.spawn(req.send, **kwargs).wait()
 
 
-def map(requests, stream=False, size=None):
-    """Concurrently converts a list of Requests to Responses.
+def get(url, **kwargs):
+    kwargs.setdefault('allow_redirects', True)
+    return request('GET', url, **kwargs)
+
+
+def options(url, **kwargs):
+    kwargs.setdefault('allow_redirects', True)
+    return request('OPTIONS', url, **kwargs)
+
+
+def head(url, **kwargs):
+    kwargs.setdefault('allow_redirects', False)
+    return request('HEAD', url, **kwargs)
+
+
+def post(url, data=None, **kwargs):
+    return request('POST', url, data=data, **kwargs)
+
+
+def put(url, data=None, **kwargs):
+    return request('PUT', url, data=data, **kwargs)
+
+
+def patch(url, data=None, **kwargs):
+    return request('PATCH', url, data=data, **kwargs)
+
+
+def delete(url, **kwargs):
+    return request('DELETE', url, **kwargs)
+
+
+def map(requests, size=10):
+    """Concurrently converts a sequence of AsyncRequest objects to Responses.
 
     :param requests: a collection of Request objects.
-    :param stream: If True, the content will not be downloaded immediately.
-    :param size: Specifies the number of requests to make at a time. If None, no throttling occurs.
+    :param size: Specifies the number of requests to make at a time, defaults to 10.
     """
 
-    requests = list(requests)
+    def send(req):
+        try:
+            return req.send()
+        except Exception as e:
+            return e
 
-    pool = GreenPool(size) if size else None
-    jobs = [send(r, pool, stream=stream) for r in requests]
-    if pool is not None:
-        pool.waitall()
-    else:
-        [j.wait() for j in jobs]
+    pool = eventlet.GreenPool(size)
+    jobs = [pool.spawn(send, r) for r in requests]
 
-    return [r.response for r in requests]
+    for j in jobs:
+        yield j.wait()
 
 
-def imap(requests, stream=False, size=2):
-    """Concurrently converts a generator object of Requests to
-    a generator of Responses.
+def imap(requests, size=10):
+    """Concurrently converts a sequence of AsyncRequest objects to Responses.
 
     :param requests: a generator of Request objects.
-    :param stream: If True, the content will not be downloaded immediately.
-    :param size: Specifies the number of requests to make at a time. default is 2
+    :param size: Specifies the number of requests to make at a time. defaults to 10.
     """
 
-    pool = GreenPool(size)
+    pool = eventlet.GreenPool(size)
 
     def send(r):
-        return r.send(stream=stream)
+        try:
+            return r.send()
+        except Exception as e:
+            return e
 
     for r in pool.imap(send, requests):
         yield r
-
-    pool.waitall()
 
