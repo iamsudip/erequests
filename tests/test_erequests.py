@@ -25,12 +25,12 @@ URLS = [httpbin('get?p=%s' % i) for i in range(N)]
 class GrequestsCase(unittest.TestCase):
 
     def test_map(self):
-        reqs = [erequests.get(url) for url in URLS]
+        reqs = [erequests.async.get(url) for url in URLS]
         resp = erequests.map(reqs, size=N)
         self.assertEqual([r.url for r in resp], URLS)
 
     def test_imap(self):
-        reqs = (erequests.get(url) for url in URLS)
+        reqs = (erequests.async.get(url) for url in URLS)
         i = 0
         for i, r in enumerate(erequests.imap(reqs, size=N)):
             self.assertTrue(r.url in URLS)
@@ -43,19 +43,9 @@ class GrequestsCase(unittest.TestCase):
             result[r.url] = True
             return r
 
-        reqs = [erequests.get(url, hooks={'response': [hook]}) for url in URLS]
-        resp = erequests.map(reqs, size=N)
+        reqs = [erequests.async.get(url, hooks={'response': [hook]}) for url in URLS]
+        resp = list(erequests.map(reqs, size=N))
         self.assertEqual(sorted(result.keys()), sorted(URLS))
-
-    def test_callback_kwarg(self):
-        result = {'ok': False}
-
-        def callback(r, **kwargs):
-            result['ok'] = True
-            return r
-
-        self.get(URLS[0], callback=callback)
-        self.assertTrue(result['ok'])
 
     def test_session_and_cookies(self):
         c1 = {'k1': 'v1'}
@@ -81,27 +71,26 @@ class GrequestsCase(unittest.TestCase):
         self.assertEqual(r['cookies'], c3)
 
     def test_calling_request(self):
-        reqs = [erequests.request('POST', httpbin('post'), data={'p': i})
+        reqs = [erequests.async.request('POST', httpbin('post'), data={'p': i})
                 for i in range(N)]
         resp = erequests.map(reqs, size=N)
         self.assertEqual([int(r.json()['form']['p']) for r in resp], list(range(N)))
 
     def test_stream_enabled(self):
-        r = erequests.map([erequests.get(httpbin('stream/10'))],
-                          size=2, stream=True)[0]
+        r = list(erequests.map([erequests.async.get(httpbin('stream/10'), stream=True)],
+                          size=2))[0]
         self.assertFalse(r._content_consumed)
 
     def test_concurrency_with_delayed_url(self):
         t = time.time()
         n = 10
-        reqs = [erequests.get(httpbin('delay/1')) for _ in range(n)]
-        resp = erequests.map(reqs, size=n)
+        reqs = [erequests.async.get(httpbin('delay/1')) for _ in range(n)]
+        resp = list(erequests.map(reqs, size=n))
         self.assertLess((time.time() - t), n)
 
     def get(self, url, **kwargs):
-        return erequests.map([erequests.get(url, **kwargs)])[0]
+        return list(erequests.map([erequests.async.get(url, **kwargs)]))[0]
 
 
 if __name__ == '__main__':
     unittest.main()
-
