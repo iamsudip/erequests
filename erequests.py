@@ -9,9 +9,11 @@ by eventlet.
 """
 
 import eventlet
+import requests
 
 # Monkey-patch.
-requests = eventlet.patcher.import_patched('requests')
+# requests = eventlet.patcher.import_patched('requests') # Deprecated cause Thowing exceptions for runtime late-binding.
+eventlet.monkey_patch(all=True, thread=False, select=False)
 
 __all__ = ['map', 'imap', 'get', 'options', 'head', 'post', 'put', 'patch', 'delete', 'request', 'async', 'AsyncRequest']
 
